@@ -589,4 +589,110 @@
             lastTimestamp = timestamp;
             // 防止切换标签页后 delta 过大
             if (deltaMs > 200) deltaMs = 16.67;
-            const deltaSec =
+            const deltaSec = deltaMs / 1000;
+            elapsedRealSeconds += deltaSec;
+
+            updateDifficulty(elapsedRealSeconds);
+
+            // 生成靶子（基于真实时间）
+            spawnTimer += deltaSec;
+            if (targets.length < maxTargets) {
+                if (spawnTimer >= nextSpawnInterval) {
+                    targets.push(createTarget());
+                    spawnTimer = 0;
+                }
+            } else {
+                spawnTimer = 0;
+            }
+
+            updateTargets(deltaSec);
+            updateReload(deltaSec);
+
+            // 冷却（基于帧，但每帧递减1，对60fps约等于实际时间，可改为基于时间，但简单起见保留帧计数）
+            if (fireCooldown > 0) fireCooldown--;
+            if (recoil > 0) recoil *= 0.82;
+
+            // 鼠标移动累积处理
+            if (isPointerLocked && (pendingMouseDX !== 0 || pendingMouseDY !== 0)) {
+                cameraYaw -= pendingMouseDX * SENSITIVITY;
+                cameraPitch -= pendingMouseDY * SENSITIVITY;
+                pendingMouseDX = 0;
+                pendingMouseDY = 0;
+            }
+
+            draw();
+            updateHUD();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // ==================== 交互 ====================
+        function getCanvasCoordsForTouch(touch) {
+            const rect = canvas.getBoundingClientRect();
+            const sx = CANVAS_W / rect.width, sy = CANVAS_H / rect.height;
+            return {
+                x: Math.min(Math.max((touch.clientX - rect.left) * sx, 0), CANVAS_W),
+                y: Math.min(Math.max((touch.clientY - rect.top) * sy, 0), CANVAS_H)
+            };
+        }
+
+        function hitButton(x, y) {
+            if (!isTouchDevice) return null;
+            if (Math.hypot(x - fireBtnX, y - fireBtnY) <= fireBtnR) return 'fire';
+            if (Math.hypot(x - zoomBtnX, y - zoomBtnY) <= zoomBtnR) return 'zoom';
+            if (Math.hypot(x - reloadBtnX, y - reloadBtnY) <= reloadBtnR) return 'reload';
+            return null;
+        }
+
+        function fire() {
+            if (isReloading) return;
+            if (ammo <= 0) {
+                // 没子弹自动换弹
+                startReload();
+                return;
+            }
+            if (fireCooldown > 0) return;
+            fireCooldown = FIRE_COOLDOWN_FRAMES;
+            recoil = 1.0;
+            ammo--;
+
+            const wp = screenToWorld(CROSSHAIR_X, CROSSHAIR_Y);
+            for (let i = targets.length - 1; i >= 0; i--) {
+                const t = targets[i];
+                const dist = Math.hypot(wp.x - t.x, wp.y - t.y);
+                if (dist <= t.r) {
+                    const ratio = dist / t.r;
+                    let pts = 6;
+                    if (ratio <= 0.4) pts = 10;
+                    else if (ratio <= 0.55) pts = 9;
+                    else if (ratio <= 0.7) pts = 8;
+                    else if (ratio <= 0.85) pts = 7;
+                    score += pts;
+                    targets.splice(i, 1);
+                    break;
+                }
+            }
+
+            // 如果打空了，自动换弹
+            if (ammo <= 0 && !isReloading) {
+                startReload();
+            }
+        }
+
+        // 指针锁定
+        function requestPointerLock() {
+            if (isTouchDevice) return;
+            if (canvas.requestPointerLock) canvas.requestPointerLock();
+            else if (canvas.mozRequestPointerLock) canvas.mozRequestPointerLock();
+            else if (canvas.webkitRequestPointerLock) canvas.webkitRequestPointerLock();
+        }
+
+        function onPointerLockChange() {
+            const locked = document.pointerLockElement === canvas ||
+                           document.mozPointerLockElement === canvas ||
+                           document.webkitPointerLockElement === canvas;
+            isPointerLocked = locked;
+            if (locked) {
+                canvas.classList.add('locked');
+                hintText.style.display = 'none';
+            } else {
+                canvas
