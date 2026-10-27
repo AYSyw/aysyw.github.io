@@ -303,7 +303,12 @@
                 else spawnTimer = 0;
                 updateTargets(ds); updateReload(ds);
                 if (fireCooldown > 0) fireCooldown--; if (recoil > 0) recoil *= 0.82;
-                if (isPointerLocked && (pendingMouseDX !== 0 || pendingMouseDY !== 0)) { cameraYaw -= pendingMouseDX*SENSITIVITY; cameraPitch -= pendingMouseDY*SENSITIVITY; pendingMouseDX = 0; pendingMouseDY = 0; }
+                if (isPointerLocked && (pendingMouseDX !== 0 || pendingMouseDY !== 0)) {
+                    // 左右操控反过来：向右移动鼠标，视角向右转
+                    cameraYaw += pendingMouseDX * SENSITIVITY;
+                    cameraPitch -= pendingMouseDY * SENSITIVITY;
+                    pendingMouseDX = 0; pendingMouseDY = 0;
+                }
                 draw(); updateHUD();
             } catch(e) { console.error(e); }
             requestAnimationFrame(gameLoop);
@@ -384,7 +389,11 @@
                 const touch = e.changedTouches[i], st = activeTouches.get(touch.identifier);
                 if (!st) continue;
                 const c = getTouchCoords(touch);
-                if (st.role === 'drag') { cameraYaw -= (c.x-st.lastX)*SENSITIVITY; cameraPitch -= (c.y-st.lastY)*SENSITIVITY; }
+                if (st.role === 'drag') {
+                    // 左右操控反过来：向右滑动，视角向右转
+                    cameraYaw += (c.x-st.lastX)*SENSITIVITY;
+                    cameraPitch -= (c.y-st.lastY)*SENSITIVITY;
+                }
                 st.lastX = c.x; st.lastY = c.y;
             }
         }
