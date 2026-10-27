@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, shrink-to-fit=no, viewport-fit=cover">
-    <title>射击练习小游戏</title>
+    <title>移动靶射击 · 战术训练</title>
     <style>
         * { box-sizing: border-box; user-select: none; -webkit-tap-highlight-color: transparent; margin: 0; padding: 0; }
         html, body {
@@ -52,7 +52,7 @@
         <div class="hud-divider"></div>
         <div class="hud-item"><span class="label">时间</span><span class="value white" id="timeDisplay">0s</span></div>
     </div>
-    <div class="hint-text" id="hintText">🎯 点击画布锁定鼠标 · 移动鼠标转视角 · 左键开火 · 右键开镜 · ESC解锁</div>
+    <div class="hint-text" id="hintText">🎯 拖动屏幕移动视角 · 点击开火</div>
 </div>
 
 <script>
@@ -79,18 +79,28 @@
 
         const ZOOM_SCALE = 2.0;
 
+        // ===== 游戏状态 =====
         let score = 0;
         let isZoomed = false;
         let cameraYaw = 0;
         let cameraPitch = 0;
         const SENSITIVITY = 2;
 
-        let targets = [];
-        const WORLD_LEFT = -2000, WORLD_RIGHT = CANVAS_W + 2000;
-        const WORLD_TOP = -1400, WORLD_BOTTOM = CANVAS_H + 1400;
+        // ===== 无限大地图：无边界限制 =====
+        // 世界坐标不再限制，靶子可以生成在任意位置
+        // 但为了保证靶子出现在附近，生成时基于相机位置偏移
 
+        let targets = [];
+
+        // 生成控制
         let spawnTimer = 0;
-        let nextSpawnInterval = 60 * 2.5;
+        // 时间流速：1秒 = 60帧（标准），使用真实时间差计算
+        let lastTimestamp = 0;
+        let realTimeAccumulator = 0; // 用于精确计时
+        let elapsedRealSeconds = 0;
+
+        // 靶子生成间隔（真实秒）
+        let nextSpawnInterval = 2.5; // 秒
         let maxTargets = 1;
         let targetSpeedMultiplier = 1.0;
 
@@ -105,20 +115,30 @@
         const CROSSHAIR_X = CANVAS_W / 2;
         const CROSSHAIR_Y = CANVAS_H / 2;
 
+        // ===== 弹药系统 =====
+        const MAGAZINE_SIZE = 6;
+        let ammo = MAGAZINE_SIZE;           // 当前弹夹子弹数
+        let isReloading = false;
+        let reloadProgress = 0;             // 0~1
+        const RELOAD_DURATION = 1.0;        // 换弹时间：1秒
+        let reloadTimer = 0;                // 已换弹时间（秒）
+
+        // 换弹按钮位置
+        const reloadBtnX = CANVAS_W - 240;
+        const reloadBtnY = CANVAS_H - 1000;
+        const reloadBtnR = 110;
+
+        // 其他按钮
         const fireBtnX = CANVAS_W - 240, fireBtnY = CANVAS_H - 280, fireBtnR = 140;
         const zoomBtnX = CANVAS_W - 240, zoomBtnY = CANVAS_H - 640, zoomBtnR = 115;
 
         const gunBaseX = CANVAS_W - 160, gunBaseY = CANVAS_H - 30;
         const gunAngle = -Math.PI * 0.65;
 
-        let frameCounter = 0;
-        const FPS = 60;
-
         const activeTouches = new Map();
 
-        // ===== 指针锁定（鼠标捕获）状态 =====
+        // ===== 指针锁定 =====
         let isPointerLocked = false;
-        // 鼠标移动累积量（指针锁定下使用 movementX/movementY）
         let pendingMouseDX = 0;
         let pendingMouseDY = 0;
 
@@ -133,57 +153,87 @@
         function worldToScreen(wx, wy) { return { x: wx - cameraYaw, y: wy - cameraPitch }; }
         function screenToWorld(sx, sy) { return { x: sx + cameraYaw, y: sy + cameraPitch }; }
 
+        // 在相机附近生成靶子（无限大地图，但保证在视野附近）
         function createTarget() {
             const r = TARGET_RADIUS;
-            let attempts = 0, x, y, overlap;
-            do {
-                x = random(WORLD_LEFT + r + 150, WORLD_RIGHT - r - 150);
-                y = random(WORLD_TOP + r + 150, WORLD_BOTTOM - r - 400);
+            // 基于相机位置，在屏幕外一定范围内随机生成
+            const viewWorldX = cameraYaw + CANVAS_W / 2;
+            const viewWorldY = cameraPitch + CANVAS_H / 2;
+            // 生成半径：在屏幕对角线外 100~800 像素范围内
+            const spawnRadius = random(900, 1600);
+            const angle = random(0, Math.PI * 2);
+            let x = viewWorldX + Math.cos(angle) * spawnRadius;
+            let y = viewWorldY + Math.sin(angle) * spawnRadius;
+
+            // 避免与其他靶子重叠
+            let attempts = 0;
+            let overlap = true;
+            while (overlap && attempts < 30) {
                 overlap = false;
                 for (let t of targets) {
                     if (Math.hypot(x - t.x, y - t.y) < r * 2.6) { overlap = true; break; }
                 }
+                if (overlap) {
+                    const na = random(0, Math.PI * 2);
+                    const nr = random(900, 1600);
+                    x = viewWorldX + Math.cos(na) * nr;
+                    y = viewWorldY + Math.sin(na) * nr;
+                }
                 attempts++;
-            } while (overlap && attempts < 30);
-            const angle = random(0, Math.PI * 2);
+            }
+
+            const moveAngle = random(0, Math.PI * 2);
             const speed = random(TARGET_SPEED_MIN, TARGET_SPEED_MAX) * targetSpeedMultiplier;
-            return { x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, r, pulse: random(0, Math.PI * 2), age: 0 };
+            return { x, y, vx: Math.cos(moveAngle) * speed, vy: Math.sin(moveAngle) * speed, r, pulse: random(0, Math.PI * 2), age: 0 };
         }
 
-        function updateTargets() {
-            for (let t of targets) {
-                t.age += 1; t.x += t.vx; t.y += t.vy;
-                if (t.x < WORLD_LEFT + t.r) { t.x = WORLD_LEFT + t.r; t.vx = -t.vx * 0.9; t.vy += random(-2, 2); }
-                else if (t.x > WORLD_RIGHT - t.r) { t.x = WORLD_RIGHT - t.r; t.vx = -t.vx * 0.9; t.vy += random(-2, 2); }
-                if (t.y < WORLD_TOP + t.r) { t.y = WORLD_TOP + t.r; t.vy = -t.vy * 0.9; t.vx += random(-2, 2); }
-                else if (t.y > WORLD_BOTTOM - t.r - 300) { t.y = WORLD_BOTTOM - t.r - 300; t.vy = -t.vy * 0.9; t.vx += random(-2, 2); }
-                const sp = Math.hypot(t.vx, t.vy);
-                const maxSp = TARGET_SPEED_MAX * 1.2 * targetSpeedMultiplier;
-                const minSp = TARGET_SPEED_MIN * 0.8 * targetSpeedMultiplier;
-                if (sp > maxSp) { t.vx = (t.vx / sp) * maxSp; t.vy = (t.vy / sp) * maxSp; }
-                else if (sp < minSp && sp > 0.01) { t.vx = (t.vx / sp) * minSp; t.vy = (t.vy / sp) * minSp; }
-                t.pulse += 0.07;
+        // 无限地图：靶子永远不反弹，自由移动，但如果离相机太远则回收
+        function updateTargets(deltaSeconds) {
+            // 速度按 60fps 基准，乘以 delta*60
+            const speedFactor = deltaSeconds * 60;
+            for (let i = targets.length - 1; i >= 0; i--) {
+                const t = targets[i];
+                t.age += 1;
+                t.x += t.vx * speedFactor;
+                t.y += t.vy * speedFactor;
+                t.pulse += 0.07 * speedFactor;
+
+                // 随机微调方向，保持移动
+                if (Math.random() < 0.01) {
+                    const ang = Math.atan2(t.vy, t.vx) + random(-0.5, 0.5);
+                    const sp = Math.hypot(t.vx, t.vy);
+                    t.vx = Math.cos(ang) * sp;
+                    t.vy = Math.sin(ang) * sp;
+                }
+
+                // 离相机太远（超过3500）则移除并重新生成
+                const viewWorldX = cameraYaw + CANVAS_W / 2;
+                const viewWorldY = cameraPitch + CANVAS_H / 2;
+                const dist = Math.hypot(t.x - viewWorldX, t.y - viewWorldY);
+                if (dist > 4000) {
+                    targets.splice(i, 1);
+                }
             }
         }
 
-        function updateDifficulty(frames) {
-            const s = frames / FPS;
-            if (s < 60) {
-                const p = s / 60;
+        // 难度基于真实时间（秒）
+        function updateDifficulty(elapsedSec) {
+            if (elapsedSec < 60) {
+                const p = elapsedSec / 60;
                 maxTargets = 1 + Math.floor(p * 2);
-                nextSpawnInterval = 60 * 2.5 - p * 60;
+                nextSpawnInterval = 2.5 - p * 0.8;
                 targetSpeedMultiplier = 1.0 + p * 0.2;
             } else {
-                const e = Math.min((s - 60) / 60, 1.5);
+                const e = Math.min((elapsedSec - 60) / 60, 1.5);
                 maxTargets = Math.min(3 + Math.floor(e * 3), 7);
-                nextSpawnInterval = Math.max(60 * 0.6, 60 * 2 - e * 60);
+                nextSpawnInterval = Math.max(0.6, 1.7 - e * 0.5);
                 targetSpeedMultiplier = 1.2 + e * 0.5;
             }
         }
 
+        // 无限地图：不再需要 clampCamera
         function clampCamera() {
-            cameraYaw = Math.max(WORLD_LEFT + 600, Math.min(WORLD_RIGHT - CANVAS_W - 600, cameraYaw));
-            cameraPitch = Math.max(WORLD_TOP + 450, Math.min(WORLD_BOTTOM - CANVAS_H - 450, cameraPitch));
+            // 无限地图，相机可以无限移动
         }
 
         // ==================== 绘制 ====================
@@ -194,9 +244,12 @@
             grad.addColorStop(0, '#1e2f42'); grad.addColorStop(0.8, '#0a0e14');
             ctx.fillStyle = grad; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
+            // 无限网格：使用取模偏移，始终填满
             const gridSize = 160;
-            const offsetX = (cameraYaw % gridSize + gridSize) % gridSize;
-            const offsetY = (cameraPitch % gridSize + gridSize) % gridSize;
+            // 正确计算偏移：相机位置取模
+            const offsetX = ((-cameraYaw) % gridSize + gridSize) % gridSize;
+            const offsetY = ((-cameraPitch) % gridSize + gridSize) % gridSize;
+            
             ctx.strokeStyle = '#3a4f66'; ctx.lineWidth = 3; ctx.globalAlpha = 0.15;
             for (let i = -gridSize; i < CANVAS_W + gridSize; i += gridSize) {
                 const x = i + offsetX;
@@ -212,7 +265,7 @@
         function drawTarget(t) {
             const s = worldToScreen(t.x, t.y);
             const cx = s.x, cy = s.y, r = t.r;
-            if (cx + r < -2000 || cx - r > CANVAS_W + 2000 || cy + r < -2000 || cy - r > CANVAS_H + 2000) return;
+            if (cx + r < -500 || cx - r > CANVAS_W + 500 || cy + r < -500 || cy - r > CANVAS_H + 500) return;
             const glow = Math.sin(t.pulse) * 0.1 + 0.9;
 
             ctx.shadowColor = '#ffaa33'; ctx.shadowBlur = 70 * glow;
@@ -291,6 +344,120 @@
             ctx.restore();
         }
 
+        // ===== 弹药显示（左下角） =====
+        function drawAmmoDisplay() {
+            const x = 60, y = CANVAS_H - 80;
+            ctx.save();
+            ctx.font = 'bold 44px "Inter", monospace';
+            ctx.fillStyle = '#e8f0f8';
+            ctx.shadowBlur = 20;
+            ctx.shadowColor = '#000';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            // 显示子弹数 / 弹夹容量
+            ctx.fillStyle = isReloading ? '#ffaa33' : (ammo > 0 ? '#e8f0f8' : '#ff5555');
+            ctx.fillText(`🔫 ${ammo} / ${MAGAZINE_SIZE}`, x, y);
+            if (isReloading) {
+                ctx.font = 'bold 28px "Inter", sans-serif';
+                ctx.fillStyle = '#ffaa33';
+                ctx.fillText('换弹中...', x, y - 50);
+            }
+            ctx.restore();
+        }
+
+        // ===== 换弹按钮（弹夹图标 + 进度环） =====
+        function drawReloadButton() {
+            if (!isTouchDevice) return;
+            const x = reloadBtnX, y = reloadBtnY, r = reloadBtnR;
+            ctx.save();
+
+            // 按钮背景
+            ctx.shadowBlur = 60;
+            ctx.shadowColor = isReloading ? '#ffaa33' : '#4488aa';
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fillStyle = isReloading ? 'rgba(120, 80, 20, 0.8)' : 'rgba(35, 55, 75, 0.75)';
+            ctx.fill();
+            ctx.strokeStyle = isReloading ? 'rgba(255, 200, 80, 0.9)' : 'rgba(120, 160, 200, 0.7)';
+            ctx.lineWidth = 9;
+            ctx.stroke();
+
+            // ===== 换弹进度环 =====
+            if (isReloading) {
+                // 进度环从 12 点钟方向开始，顺时针
+                const startAngle = -Math.PI / 2;
+                const endAngle = startAngle + (Math.PI * 2) * reloadProgress;
+                ctx.beginPath();
+                ctx.arc(x, y, r + 18, startAngle, endAngle);
+                ctx.strokeStyle = '#ffd966';
+                ctx.lineWidth = 14;
+                ctx.lineCap = 'round';
+                ctx.shadowBlur = 30;
+                ctx.shadowColor = '#ffaa00';
+                ctx.stroke();
+                // 背景环（未完成部分）
+                ctx.beginPath();
+                ctx.arc(x, y, r + 18, endAngle, startAngle + Math.PI * 2);
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+                ctx.lineWidth = 14;
+                ctx.lineCap = 'round';
+                ctx.shadowBlur = 0;
+                ctx.stroke();
+            }
+
+            // ===== 弹夹图标 =====
+            ctx.shadowBlur = 20;
+            ctx.shadowColor = isReloading ? '#ffcc66' : '#88bbdd';
+            ctx.fillStyle = isReloading ? '#ffdd99' : '#d0e4f8';
+            ctx.strokeStyle = isReloading ? '#ffcc66' : '#88bbdd';
+            ctx.lineWidth = 5;
+
+            // 画一个弹夹形状（矩形带圆角，倾斜一点）
+            const clipW = r * 0.55;
+            const clipH = r * 0.8;
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(-0.2);
+            // 弹夹主体
+            ctx.beginPath();
+            ctx.roundRect(-clipW/2, -clipH/2, clipW, clipH, 8);
+            ctx.fill();
+            ctx.stroke();
+            // 子弹装饰（几条横线）
+            ctx.beginPath();
+            for (let i = 1; i <= 3; i++) {
+                const yy = -clipH/2 + (clipH * i / 4);
+                ctx.moveTo(-clipW/2 + 8, yy);
+                ctx.lineTo(clipW/2 - 8, yy);
+            }
+            ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            // 顶部小突起
+            ctx.beginPath();
+            ctx.rect(-clipW/2 + 6, -clipH/2 - 6, clipW - 12, 8);
+            ctx.fillStyle = isReloading ? '#ffdd99' : '#d0e4f8';
+            ctx.fill();
+            ctx.restore();
+
+            ctx.restore();
+        }
+
+        // 给 CanvasRenderingContext2D 添加 roundRect 方法（如果浏览器不支持）
+        if (!CanvasRenderingContext2D.prototype.roundRect) {
+            CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+                if (w < 2 * r) r = w / 2;
+                if (h < 2 * r) r = h / 2;
+                this.moveTo(x + r, y);
+                this.arcTo(x + w, y, x + w, y + h, r);
+                this.arcTo(x + w, y + h, x, y + h, r);
+                this.arcTo(x, y + h, x, y, r);
+                this.arcTo(x, y, x + w, y, r);
+                this.closePath();
+                return this;
+            };
+        }
+
         function drawFireButton() {
             if (!isTouchDevice) return;
             const x = fireBtnX, y = fireBtnY, r = fireBtnR;
@@ -350,7 +517,8 @@
         function updateHUD() {
             scoreSpan.textContent = score;
             targetCountSpan.textContent = `${targets.length}/${maxTargets}`;
-            timeSpan.textContent = Math.floor(frameCounter / FPS) + 's';
+            // 显示真实秒数
+            timeSpan.textContent = Math.floor(elapsedRealSeconds) + 's';
         }
 
         function draw() {
@@ -368,11 +536,12 @@
 
             drawGun();
             drawCrosshair();
+            drawAmmoDisplay();
             drawFireButton();
             drawZoomButton();
+            drawReloadButton();
             drawZoomVignette();
 
-            // 电脑端未锁定时显示提示
             if (!isTouchDevice && !isPointerLocked) {
                 ctx.save();
                 ctx.font = 'bold 60px "Inter", "Segoe UI", sans-serif';
@@ -386,216 +555,38 @@
                 ctx.fillText('点击画面锁定鼠标', CANVAS_W/2, CANVAS_H/2 - 20);
                 ctx.font = 'bold 40px "Inter", "Segoe UI", sans-serif';
                 ctx.fillStyle = '#aaccff';
-                ctx.fillText('移动鼠标转视角 · 左键开火 · 右键开镜 · ESC解锁', CANVAS_W/2, CANVAS_H/2 + 60);
+                ctx.fillText('移动鼠标转视角 · 左键开火 · 右键开镜 · R换弹 · ESC解锁', CANVAS_W/2, CANVAS_H/2 + 60);
                 ctx.restore();
             }
         }
 
+        // ==================== 换弹逻辑 ====================
+        function startReload() {
+            if (isReloading) return;
+            if (ammo === MAGAZINE_SIZE) return;
+            isReloading = true;
+            reloadProgress = 0;
+            reloadTimer = 0;
+        }
+
+        function updateReload(deltaSec) {
+            if (!isReloading) return;
+            reloadTimer += deltaSec;
+            reloadProgress = Math.min(reloadTimer / RELOAD_DURATION, 1);
+            if (reloadTimer >= RELOAD_DURATION) {
+                ammo = MAGAZINE_SIZE;
+                isReloading = false;
+                reloadProgress = 0;
+                reloadTimer = 0;
+            }
+        }
+
         // ==================== 游戏循环 ====================
-        function gameLoop() {
-            frameCounter++;
-            updateDifficulty(frameCounter);
-
-            if (targets.length < maxTargets) {
-                spawnTimer++;
-                if (spawnTimer >= nextSpawnInterval) {
-                    targets.push(createTarget());
-                    spawnTimer = 0;
-                }
-            } else spawnTimer = 0;
-
-            updateTargets();
-            clampCamera();
-            if (fireCooldown > 0) fireCooldown--;
-            if (recoil > 0) recoil *= 0.82;
-
-            // 处理指针锁定下累积的鼠标移动（在每一帧统一应用）
-            if (isPointerLocked && (pendingMouseDX !== 0 || pendingMouseDY !== 0)) {
-                cameraYaw -= pendingMouseDX * SENSITIVITY;
-                cameraPitch -= pendingMouseDY * SENSITIVITY;
-                clampCamera();
-                pendingMouseDX = 0;
-                pendingMouseDY = 0;
-            }
-
-            draw();
-            updateHUD();
-            requestAnimationFrame(gameLoop);
-        }
-
-        // ==================== 交互 ====================
-        function getCanvasCoordsForTouch(touch) {
-            const rect = canvas.getBoundingClientRect();
-            const sx = CANVAS_W / rect.width, sy = CANVAS_H / rect.height;
-            return {
-                x: Math.min(Math.max((touch.clientX - rect.left) * sx, 0), CANVAS_W),
-                y: Math.min(Math.max((touch.clientY - rect.top) * sy, 0), CANVAS_H)
-            };
-        }
-
-        function hitButton(x, y) {
-            if (!isTouchDevice) return null;
-            if (Math.hypot(x - fireBtnX, y - fireBtnY) <= fireBtnR) return 'fire';
-            if (Math.hypot(x - zoomBtnX, y - zoomBtnY) <= zoomBtnR) return 'zoom';
-            return null;
-        }
-
-        function fire() {
-            if (fireCooldown > 0) return;
-            fireCooldown = FIRE_COOLDOWN_FRAMES; recoil = 1.0;
-            const wp = screenToWorld(CROSSHAIR_X, CROSSHAIR_Y);
-            for (let i = targets.length - 1; i >= 0; i--) {
-                const t = targets[i];
-                const dist = Math.hypot(wp.x - t.x, wp.y - t.y);
-                if (dist <= t.r) {
-                    const ratio = dist / t.r;
-                    let pts = 6;
-                    if (ratio <= 0.4) pts = 10;
-                    else if (ratio <= 0.55) pts = 9;
-                    else if (ratio <= 0.7) pts = 8;
-                    else if (ratio <= 0.85) pts = 7;
-                    score += pts;
-                    targets.splice(i, 1);
-                    break;
-                }
-            }
-        }
-
-        // ==================== 指针锁定 API ====================
-        function requestPointerLock() {
-            if (isTouchDevice) return;
-            if (canvas.requestPointerLock) {
-                canvas.requestPointerLock();
-            } else if (canvas.mozRequestPointerLock) {
-                canvas.mozRequestPointerLock();
-            } else if (canvas.webkitRequestPointerLock) {
-                canvas.webkitRequestPointerLock();
-            }
-        }
-
-        function onPointerLockChange() {
-            const locked = document.pointerLockElement === canvas ||
-                           document.mozPointerLockElement === canvas ||
-                           document.webkitPointerLockElement === canvas;
-            isPointerLocked = locked;
-            if (locked) {
-                canvas.classList.add('locked');
-                hintText.style.display = 'none';
-            } else {
-                canvas.classList.remove('locked');
-                hintText.style.display = '';
-                pendingMouseDX = 0;
-                pendingMouseDY = 0;
-            }
-        }
-
-        function onPointerLockError() {
-            console.warn('指针锁定失败');
-        }
-
-        // 鼠标移动事件（指针锁定下获取 movementX/Y）
-        function onMouseMoveLocked(e) {
-            if (isTouchDevice) return;
-            if (!isPointerLocked) return;
-            e.preventDefault();
-            // 累加移动量，在游戏循环中统一应用（避免帧率波动导致灵敏度不一致）
-            pendingMouseDX += e.movementX || 0;
-            pendingMouseDY += e.movementY || 0;
-        }
-
-        // 鼠标按下（开火/开镜）
-        function onMouseDownLocked(e) {
-            if (isTouchDevice) return;
-            e.preventDefault();
-            if (!isPointerLocked) {
-                // 未锁定时，点击画布请求锁定，不触发开火
-                requestPointerLock();
-                return;
-            }
-            if (e.button === 0) {
-                fire();
-            } else if (e.button === 2) {
-                isZoomed = !isZoomed;
-            }
-        }
-
-        function onContextMenuLocked(e) {
-            e.preventDefault();
-            return false;
-        }
-
-        // ==================== 触屏事件 ====================
-        function handleTouchStart(e) {
-            e.preventDefault();
-            for (let i = 0; i < e.changedTouches.length; i++) {
-                const touch = e.changedTouches[i];
-                const c = getCanvasCoordsForTouch(touch);
-                const btn = hitButton(c.x, c.y);
-                if (btn === 'fire') {
-                    fire();
-                    activeTouches.set(touch.identifier, { role: 'fire', lastX: c.x, lastY: c.y });
-                } else if (btn === 'zoom') {
-                    isZoomed = !isZoomed;
-                    activeTouches.set(touch.identifier, { role: 'zoom', lastX: c.x, lastY: c.y });
-                } else {
-                    activeTouches.set(touch.identifier, { role: 'drag', lastX: c.x, lastY: c.y });
-                }
-            }
-        }
-
-        function handleTouchMove(e) {
-            e.preventDefault();
-            for (let i = 0; i < e.changedTouches.length; i++) {
-                const touch = e.changedTouches[i];
-                const st = activeTouches.get(touch.identifier);
-                if (!st) continue;
-                const c = getCanvasCoordsForTouch(touch);
-                if (st.role === 'drag') {
-                    cameraYaw -= (c.x - st.lastX) * SENSITIVITY;
-                    cameraPitch -= (c.y - st.lastY) * SENSITIVITY;
-                    clampCamera();
-                }
-                st.lastX = c.x; st.lastY = c.y;
-            }
-        }
-
-        function handleTouchEnd(e) {
-            e.preventDefault();
-            for (let i = 0; i < e.changedTouches.length; i++) {
-                activeTouches.delete(e.changedTouches[i].identifier);
-            }
-        }
-
-        // ==================== 事件绑定 ====================
-        // 指针锁定事件
-        document.addEventListener('pointerlockchange', onPointerLockChange);
-        document.addEventListener('mozpointerlockchange', onPointerLockChange);
-        document.addEventListener('webkitpointerlockchange', onPointerLockChange);
-        document.addEventListener('pointerlockerror', onPointerLockError);
-        document.addEventListener('mozpointerlockerror', onPointerLockError);
-        document.addEventListener('webkitpointerlockerror', onPointerLockError);
-
-        // 鼠标事件
-        canvas.addEventListener('contextmenu', onContextMenuLocked);
-        canvas.addEventListener('mousemove', onMouseMoveLocked);
-        canvas.addEventListener('mousedown', onMouseDownLocked);
-
-        // 触屏事件
-        canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
-        canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
-        canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
-        canvas.addEventListener('touchcancel', handleTouchEnd, { passive: false });
-
-        canvas.addEventListener('dblclick', (e) => e.preventDefault());
-
-        // 初始化
-        resizeCanvas();
-        targets = [];
-        scoreSpan.textContent = '0';
-
-        gameLoop();
-        window.addEventListener('resize', resizeCanvas);
-    })();
-</script>
-</body>
-</html>
+        function gameLoop(timestamp) {
+            // 计算真实时间差
+            if (!lastTimestamp) lastTimestamp = timestamp;
+            let deltaMs = timestamp - lastTimestamp;
+            lastTimestamp = timestamp;
+            // 防止切换标签页后 delta 过大
+            if (deltaMs > 200) deltaMs = 16.67;
+            const deltaSec =
