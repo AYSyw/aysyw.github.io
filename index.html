@@ -66,8 +66,21 @@
         const CANVAS_W = 2560;
         const CANVAS_H = 1660;
 
-        const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
-        if (!isTouchDevice) hintText.textContent = '🎯 移动鼠标转动视角 · 左键开火 · 右键开镜';
+        // ===== 设备检测 =====
+        // 使用更严格的检测：只有真正有触摸屏且没有鼠标的设备才视为移动端
+        // 电脑浏览器通常 maxTouchPoints 为 0，但某些触摸屏笔记本可能 >0，它们仍有鼠标。
+        // 使用 pointer: coarse 媒体查询来判断主要输入方式
+        const hasCoarsePointer = window.matchMedia('(pointer: coarse)').matches;
+        const hasFinePointer = window.matchMedia('(pointer: fine)').matches;
+        const hasTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+        
+        // 判定为移动端：有触摸能力 且 (没有精细指针 或 没有鼠标)
+        // 电脑端无论是否有触摸屏，只要 main pointer 是 fine 就当作电脑
+        const isTouchDevice = hasTouch && (hasCoarsePointer || !hasFinePointer);
+
+        if (!isTouchDevice) {
+            hintText.textContent = '🎯 移动鼠标转动视角 · 左键开火 · 右键开镜';
+        }
 
         // ===== 开镜缩放倍率 =====
         const ZOOM_SCALE = 2.0;
@@ -99,7 +112,7 @@
         const CROSSHAIR_X = CANVAS_W / 2;
         const CROSSHAIR_Y = CANVAS_H / 2;
 
-        // 按钮位置
+        // 按钮位置（仅手机端绘制）
         const fireBtnX = CANVAS_W - 240, fireBtnY = CANVAS_H - 280, fireBtnR = 140;
         const zoomBtnX = CANVAS_W - 240, zoomBtnY = CANVAS_H - 640, zoomBtnR = 115;
 
@@ -350,7 +363,6 @@
 
             ctx.save();
             if (isZoomed) {
-                // 以准星（屏幕中心）为原点放大
                 ctx.translate(CROSSHAIR_X, CROSSHAIR_Y);
                 ctx.scale(ZOOM_SCALE, ZOOM_SCALE);
                 ctx.translate(-CROSSHAIR_X, -CROSSHAIR_Y);
@@ -520,19 +532,19 @@
 
         function onContextMenu(e) { e.preventDefault(); return false; }
 
+        // ===== 事件绑定 =====
+        // 始终绑定鼠标事件（即使被判定为触屏设备，如果用户有鼠标也应该能用）
         canvas.addEventListener('contextmenu', onContextMenu);
+        canvas.addEventListener('mousemove', onMouseMove);
+        canvas.addEventListener('mousedown', onMouseDown);
+        canvas.addEventListener('mouseup', onMouseUp);
+        canvas.addEventListener('mouseleave', onMouseUp);
 
-        if (isTouchDevice) {
-            canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
-            canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
-            canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
-            canvas.addEventListener('touchcancel', handleTouchEnd, { passive: false });
-        } else {
-            canvas.addEventListener('mousemove', onMouseMove);
-            canvas.addEventListener('mousedown', onMouseDown);
-            canvas.addEventListener('mouseup', onMouseUp);
-            canvas.addEventListener('mouseleave', onMouseUp);
-        }
+        // 始终绑定触摸事件（支持触摸屏笔记本或用户切换）
+        canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+        canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+        canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+        canvas.addEventListener('touchcancel', handleTouchEnd, { passive: false });
 
         canvas.addEventListener('dblclick', (e) => e.preventDefault());
 
