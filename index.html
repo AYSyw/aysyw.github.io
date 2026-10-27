@@ -12,7 +12,8 @@
             display: flex; align-items: center; justify-content: center;
         }
         .game-wrapper { position: relative; width: 100vw; height: 100vh; background: #0a0e14; overflow: hidden; }
-        canvas { display: block; width: 100%; height: 100%; background: radial-gradient(circle at 30% 20%, #1e2a3a, #0a0e14); touch-action: none; }
+        canvas { display: block; width: 100%; height: 100%; background: radial-gradient(circle at 30% 20%, #1e2a3a, #0a0e14); touch-action: none; cursor: crosshair; }
+        canvas.locked { cursor: none; }
 
         .hud-top {
             position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
@@ -51,7 +52,7 @@
         <div class="hud-divider"></div>
         <div class="hud-item"><span class="label">时间</span><span class="value white" id="timeDisplay">0s</span></div>
     </div>
-    <div class="hint-text" id="hintText">🎯 拖动屏幕移动视角 · 点击开火</div>
+    <div class="hint-text" id="hintText">🎯 点击画布锁定鼠标 · 移动鼠标转视角 · 左键开火 · 右键开镜 · ESC解锁</div>
 </div>
 
 <script>
@@ -66,26 +67,18 @@
         const CANVAS_W = 2560;
         const CANVAS_H = 1660;
 
-        // ===== 设备检测 =====
-        // 使用更严格的检测：只有真正有触摸屏且没有鼠标的设备才视为移动端
-        // 电脑浏览器通常 maxTouchPoints 为 0，但某些触摸屏笔记本可能 >0，它们仍有鼠标。
-        // 使用 pointer: coarse 媒体查询来判断主要输入方式
+        // 设备检测
         const hasCoarsePointer = window.matchMedia('(pointer: coarse)').matches;
         const hasFinePointer = window.matchMedia('(pointer: fine)').matches;
         const hasTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
-        
-        // 判定为移动端：有触摸能力 且 (没有精细指针 或 没有鼠标)
-        // 电脑端无论是否有触摸屏，只要 main pointer 是 fine 就当作电脑
         const isTouchDevice = hasTouch && (hasCoarsePointer || !hasFinePointer);
 
         if (!isTouchDevice) {
-            hintText.textContent = '🎯 移动鼠标转动视角 · 左键开火 · 右键开镜';
+            hintText.textContent = '🎯 点击画布锁定鼠标 · 移动鼠标转视角 · 左键开火 · 右键开镜 · ESC解锁';
         }
 
-        // ===== 开镜缩放倍率 =====
         const ZOOM_SCALE = 2.0;
 
-        // 游戏状态
         let score = 0;
         let isZoomed = false;
         let cameraYaw = 0;
@@ -112,11 +105,9 @@
         const CROSSHAIR_X = CANVAS_W / 2;
         const CROSSHAIR_Y = CANVAS_H / 2;
 
-        // 按钮位置（仅手机端绘制）
         const fireBtnX = CANVAS_W - 240, fireBtnY = CANVAS_H - 280, fireBtnR = 140;
         const zoomBtnX = CANVAS_W - 240, zoomBtnY = CANVAS_H - 640, zoomBtnR = 115;
 
-        // 枪械
         const gunBaseX = CANVAS_W - 160, gunBaseY = CANVAS_H - 30;
         const gunAngle = -Math.PI * 0.65;
 
@@ -124,7 +115,12 @@
         const FPS = 60;
 
         const activeTouches = new Map();
-        let isMouseDown = false, lastMouseX = 0, lastMouseY = 0;
+
+        // ===== 指针锁定（鼠标捕获）状态 =====
+        let isPointerLocked = false;
+        // 鼠标移动累积量（指针锁定下使用 movementX/movementY）
+        let pendingMouseDX = 0;
+        let pendingMouseDY = 0;
 
         function resizeCanvas() {
             canvas.style.width = '100%';
@@ -357,7 +353,6 @@
             timeSpan.textContent = Math.floor(frameCounter / FPS) + 's';
         }
 
-        // ===== 核心绘制：开镜时放大背景和靶子 =====
         function draw() {
             ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
 
@@ -371,12 +366,29 @@
             for (let t of targets) drawTarget(t);
             ctx.restore();
 
-            // 以下内容不放大，固定在屏幕上
             drawGun();
             drawCrosshair();
             drawFireButton();
             drawZoomButton();
             drawZoomVignette();
+
+            // 电脑端未锁定时显示提示
+            if (!isTouchDevice && !isPointerLocked) {
+                ctx.save();
+                ctx.font = 'bold 60px "Inter", "Segoe UI", sans-serif';
+                ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                ctx.fillRect(0, CANVAS_H/2 - 120, CANVAS_W, 240);
+                ctx.fillStyle = '#ffffff';
+                ctx.shadowBlur = 20;
+                ctx.shadowColor = '#000';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('点击画面锁定鼠标', CANVAS_W/2, CANVAS_H/2 - 20);
+                ctx.font = 'bold 40px "Inter", "Segoe UI", sans-serif';
+                ctx.fillStyle = '#aaccff';
+                ctx.fillText('移动鼠标转视角 · 左键开火 · 右键开镜 · ESC解锁', CANVAS_W/2, CANVAS_H/2 + 60);
+                ctx.restore();
+            }
         }
 
         // ==================== 游戏循环 ====================
@@ -397,6 +409,15 @@
             if (fireCooldown > 0) fireCooldown--;
             if (recoil > 0) recoil *= 0.82;
 
+            // 处理指针锁定下累积的鼠标移动（在每一帧统一应用）
+            if (isPointerLocked && (pendingMouseDX !== 0 || pendingMouseDY !== 0)) {
+                cameraYaw -= pendingMouseDX * SENSITIVITY;
+                cameraPitch -= pendingMouseDY * SENSITIVITY;
+                clampCamera();
+                pendingMouseDX = 0;
+                pendingMouseDY = 0;
+            }
+
             draw();
             updateHUD();
             requestAnimationFrame(gameLoop);
@@ -409,20 +430,6 @@
             return {
                 x: Math.min(Math.max((touch.clientX - rect.left) * sx, 0), CANVAS_W),
                 y: Math.min(Math.max((touch.clientY - rect.top) * sy, 0), CANVAS_H)
-            };
-        }
-
-        function getCanvasCoords(e) {
-            const rect = canvas.getBoundingClientRect();
-            const sx = CANVAS_W / rect.width, sy = CANVAS_H / rect.height;
-            let cx, cy;
-            if (e.touches) {
-                if (e.touches.length === 0) return null;
-                cx = e.touches[0].clientX; cy = e.touches[0].clientY;
-            } else { cx = e.clientX; cy = e.clientY; }
-            return {
-                x: Math.min(Math.max((cx - rect.left) * sx, 0), CANVAS_W),
-                y: Math.min(Math.max((cy - rect.top) * sy, 0), CANVAS_H)
             };
         }
 
@@ -454,7 +461,70 @@
             }
         }
 
-        // 触屏
+        // ==================== 指针锁定 API ====================
+        function requestPointerLock() {
+            if (isTouchDevice) return;
+            if (canvas.requestPointerLock) {
+                canvas.requestPointerLock();
+            } else if (canvas.mozRequestPointerLock) {
+                canvas.mozRequestPointerLock();
+            } else if (canvas.webkitRequestPointerLock) {
+                canvas.webkitRequestPointerLock();
+            }
+        }
+
+        function onPointerLockChange() {
+            const locked = document.pointerLockElement === canvas ||
+                           document.mozPointerLockElement === canvas ||
+                           document.webkitPointerLockElement === canvas;
+            isPointerLocked = locked;
+            if (locked) {
+                canvas.classList.add('locked');
+                hintText.style.display = 'none';
+            } else {
+                canvas.classList.remove('locked');
+                hintText.style.display = '';
+                pendingMouseDX = 0;
+                pendingMouseDY = 0;
+            }
+        }
+
+        function onPointerLockError() {
+            console.warn('指针锁定失败');
+        }
+
+        // 鼠标移动事件（指针锁定下获取 movementX/Y）
+        function onMouseMoveLocked(e) {
+            if (isTouchDevice) return;
+            if (!isPointerLocked) return;
+            e.preventDefault();
+            // 累加移动量，在游戏循环中统一应用（避免帧率波动导致灵敏度不一致）
+            pendingMouseDX += e.movementX || 0;
+            pendingMouseDY += e.movementY || 0;
+        }
+
+        // 鼠标按下（开火/开镜）
+        function onMouseDownLocked(e) {
+            if (isTouchDevice) return;
+            e.preventDefault();
+            if (!isPointerLocked) {
+                // 未锁定时，点击画布请求锁定，不触发开火
+                requestPointerLock();
+                return;
+            }
+            if (e.button === 0) {
+                fire();
+            } else if (e.button === 2) {
+                isZoomed = !isZoomed;
+            }
+        }
+
+        function onContextMenuLocked(e) {
+            e.preventDefault();
+            return false;
+        }
+
+        // ==================== 触屏事件 ====================
         function handleTouchStart(e) {
             e.preventDefault();
             for (let i = 0; i < e.changedTouches.length; i++) {
@@ -496,51 +566,21 @@
             }
         }
 
-        // 鼠标
-        function onMouseMove(e) {
-            if (isTouchDevice) return;
-            e.preventDefault();
-            const c = getCanvasCoords(e);
-            if (!c) return;
-            if (isMouseDown) {
-                cameraYaw -= (c.x - lastMouseX) * SENSITIVITY;
-                cameraPitch -= (c.y - lastMouseY) * SENSITIVITY;
-                clampCamera();
-            }
-            lastMouseX = c.x; lastMouseY = c.y;
-        }
+        // ==================== 事件绑定 ====================
+        // 指针锁定事件
+        document.addEventListener('pointerlockchange', onPointerLockChange);
+        document.addEventListener('mozpointerlockchange', onPointerLockChange);
+        document.addEventListener('webkitpointerlockchange', onPointerLockChange);
+        document.addEventListener('pointerlockerror', onPointerLockError);
+        document.addEventListener('mozpointerlockerror', onPointerLockError);
+        document.addEventListener('webkitpointerlockerror', onPointerLockError);
 
-        function onMouseDown(e) {
-            if (isTouchDevice) return;
-            e.preventDefault();
-            const c = getCanvasCoords(e);
-            if (!c) return;
-            if (e.button === 0) {
-                fire();
-                isMouseDown = true;
-                lastMouseX = c.x; lastMouseY = c.y;
-            } else if (e.button === 2) {
-                isZoomed = !isZoomed;
-            }
-        }
+        // 鼠标事件
+        canvas.addEventListener('contextmenu', onContextMenuLocked);
+        canvas.addEventListener('mousemove', onMouseMoveLocked);
+        canvas.addEventListener('mousedown', onMouseDownLocked);
 
-        function onMouseUp(e) {
-            if (isTouchDevice) return;
-            e.preventDefault();
-            isMouseDown = false;
-        }
-
-        function onContextMenu(e) { e.preventDefault(); return false; }
-
-        // ===== 事件绑定 =====
-        // 始终绑定鼠标事件（即使被判定为触屏设备，如果用户有鼠标也应该能用）
-        canvas.addEventListener('contextmenu', onContextMenu);
-        canvas.addEventListener('mousemove', onMouseMove);
-        canvas.addEventListener('mousedown', onMouseDown);
-        canvas.addEventListener('mouseup', onMouseUp);
-        canvas.addEventListener('mouseleave', onMouseUp);
-
-        // 始终绑定触摸事件（支持触摸屏笔记本或用户切换）
+        // 触屏事件
         canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
         canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
         canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
