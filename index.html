@@ -1,1 +1,549 @@
-<meta http-equiv="refresh" content="0; url=https://space.bilibili.com/397582598">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, shrink-to-fit=no, viewport-fit=cover">
+    <title>移动靶射击 · 战术训练</title>
+    <style>
+        * { box-sizing: border-box; user-select: none; -webkit-tap-highlight-color: transparent; margin: 0; padding: 0; }
+        html, body {
+            width: 100%; height: 100%; overflow: hidden; background: #000;
+            font-family: 'Inter', 'Segoe UI', Roboto, system-ui, sans-serif; touch-action: none;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .game-wrapper { position: relative; width: 100vw; height: 100vh; background: #0a0e14; overflow: hidden; }
+        canvas { display: block; width: 100%; height: 100%; background: radial-gradient(circle at 30% 20%, #1e2a3a, #0a0e14); touch-action: none; }
+
+        .hud-top {
+            position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+            display: flex; align-items: center; gap: 16px; padding: 8px 24px;
+            background: rgba(10, 16, 24, 0.75); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+            border-radius: 100px; border: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+            pointer-events: none; z-index: 20; white-space: nowrap;
+        }
+        .hud-item { display: flex; align-items: center; gap: 8px; color: #e8f0f8; font-weight: 600; font-size: 1rem; letter-spacing: 0.3px; }
+        .hud-item .label { opacity: 0.6; font-weight: 500; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.8px; }
+        .hud-item .value { font-weight: 800; font-size: 1.2rem; color: #ffd966; text-shadow: 0 0 12px rgba(255, 200, 50, 0.4); font-variant-numeric: tabular-nums; }
+        .hud-divider { width: 1px; height: 24px; background: rgba(255, 255, 255, 0.15); }
+        .hud-item .value.white { color: #e8f0f8; text-shadow: none; }
+        .hint-text {
+            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+            color: rgba(200, 220, 240, 0.5); font-size: 0.8rem; font-weight: 400; letter-spacing: 0.5px;
+            pointer-events: none; z-index: 10; text-shadow: 0 2px 8px rgba(0,0,0,0.8); white-space: nowrap;
+        }
+        @media (max-width: 700px) {
+            .hud-top { top: 10px; gap: 10px; padding: 6px 16px; }
+            .hud-item { font-size: 0.85rem; gap: 5px; }
+            .hud-item .label { font-size: 0.7rem; }
+            .hud-item .value { font-size: 1rem; }
+            .hint-text { font-size: 0.7rem; bottom: 12px; }
+        }
+    </style>
+</head>
+<body>
+<div class="game-wrapper" id="gameWrapper">
+    <canvas id="gameCanvas" width="2560" height="1660"></canvas>
+    <div class="hud-top">
+        <div class="hud-item"><span class="label">得分</span><span class="value" id="scoreDisplay">0</span></div>
+        <div class="hud-divider"></div>
+        <div class="hud-item"><span class="label">靶子</span><span class="value white" id="targetCountDisplay">0/1</span></div>
+        <div class="hud-divider"></div>
+        <div class="hud-item"><span class="label">时间</span><span class="value white" id="timeDisplay">0s</span></div>
+    </div>
+    <div class="hint-text" id="hintText">🎯 拖动屏幕移动视角 · 点击开火</div>
+</div>
+
+<script>
+    (function(){
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreSpan = document.getElementById('scoreDisplay');
+        const targetCountSpan = document.getElementById('targetCountDisplay');
+        const timeSpan = document.getElementById('timeDisplay');
+        const hintText = document.getElementById('hintText');
+
+        const CANVAS_W = 2560;
+        const CANVAS_H = 1660;
+
+        const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+        if (!isTouchDevice) hintText.textContent = '🎯 移动鼠标转动视角 · 左键开火 · 右键开镜';
+
+        // ===== 开镜缩放倍率 =====
+        const ZOOM_SCALE = 2.0;
+
+        // 游戏状态
+        let score = 0;
+        let isZoomed = false;
+        let cameraYaw = 0;
+        let cameraPitch = 0;
+        const SENSITIVITY = 2;
+
+        let targets = [];
+        const WORLD_LEFT = -2000, WORLD_RIGHT = CANVAS_W + 2000;
+        const WORLD_TOP = -1400, WORLD_BOTTOM = CANVAS_H + 1400;
+
+        let spawnTimer = 0;
+        let nextSpawnInterval = 60 * 2.5;
+        let maxTargets = 1;
+        let targetSpeedMultiplier = 1.0;
+
+        let fireCooldown = 0;
+        const FIRE_COOLDOWN_FRAMES = 10;
+        let recoil = 0;
+
+        const TARGET_RADIUS = 100;
+        const TARGET_SPEED_MIN = 2.0;
+        const TARGET_SPEED_MAX = 6.5;
+
+        const CROSSHAIR_X = CANVAS_W / 2;
+        const CROSSHAIR_Y = CANVAS_H / 2;
+
+        // 按钮位置
+        const fireBtnX = CANVAS_W - 240, fireBtnY = CANVAS_H - 280, fireBtnR = 140;
+        const zoomBtnX = CANVAS_W - 240, zoomBtnY = CANVAS_H - 640, zoomBtnR = 115;
+
+        // 枪械
+        const gunBaseX = CANVAS_W - 160, gunBaseY = CANVAS_H - 30;
+        const gunAngle = -Math.PI * 0.65;
+
+        let frameCounter = 0;
+        const FPS = 60;
+
+        const activeTouches = new Map();
+        let isMouseDown = false, lastMouseX = 0, lastMouseY = 0;
+
+        function resizeCanvas() {
+            canvas.style.width = '100%';
+            canvas.style.height = '100%';
+        }
+        window.addEventListener('resize', resizeCanvas);
+        window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 200));
+
+        function random(min, max) { return Math.random() * (max - min) + min; }
+        function worldToScreen(wx, wy) { return { x: wx - cameraYaw, y: wy - cameraPitch }; }
+        function screenToWorld(sx, sy) { return { x: sx + cameraYaw, y: sy + cameraPitch }; }
+
+        function createTarget() {
+            const r = TARGET_RADIUS;
+            let attempts = 0, x, y, overlap;
+            do {
+                x = random(WORLD_LEFT + r + 150, WORLD_RIGHT - r - 150);
+                y = random(WORLD_TOP + r + 150, WORLD_BOTTOM - r - 400);
+                overlap = false;
+                for (let t of targets) {
+                    if (Math.hypot(x - t.x, y - t.y) < r * 2.6) { overlap = true; break; }
+                }
+                attempts++;
+            } while (overlap && attempts < 30);
+            const angle = random(0, Math.PI * 2);
+            const speed = random(TARGET_SPEED_MIN, TARGET_SPEED_MAX) * targetSpeedMultiplier;
+            return { x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, r, pulse: random(0, Math.PI * 2), age: 0 };
+        }
+
+        function updateTargets() {
+            for (let t of targets) {
+                t.age += 1; t.x += t.vx; t.y += t.vy;
+                if (t.x < WORLD_LEFT + t.r) { t.x = WORLD_LEFT + t.r; t.vx = -t.vx * 0.9; t.vy += random(-2, 2); }
+                else if (t.x > WORLD_RIGHT - t.r) { t.x = WORLD_RIGHT - t.r; t.vx = -t.vx * 0.9; t.vy += random(-2, 2); }
+                if (t.y < WORLD_TOP + t.r) { t.y = WORLD_TOP + t.r; t.vy = -t.vy * 0.9; t.vx += random(-2, 2); }
+                else if (t.y > WORLD_BOTTOM - t.r - 300) { t.y = WORLD_BOTTOM - t.r - 300; t.vy = -t.vy * 0.9; t.vx += random(-2, 2); }
+                const sp = Math.hypot(t.vx, t.vy);
+                const maxSp = TARGET_SPEED_MAX * 1.2 * targetSpeedMultiplier;
+                const minSp = TARGET_SPEED_MIN * 0.8 * targetSpeedMultiplier;
+                if (sp > maxSp) { t.vx = (t.vx / sp) * maxSp; t.vy = (t.vy / sp) * maxSp; }
+                else if (sp < minSp && sp > 0.01) { t.vx = (t.vx / sp) * minSp; t.vy = (t.vy / sp) * minSp; }
+                t.pulse += 0.07;
+            }
+        }
+
+        function updateDifficulty(frames) {
+            const s = frames / FPS;
+            if (s < 60) {
+                const p = s / 60;
+                maxTargets = 1 + Math.floor(p * 2);
+                nextSpawnInterval = 60 * 2.5 - p * 60;
+                targetSpeedMultiplier = 1.0 + p * 0.2;
+            } else {
+                const e = Math.min((s - 60) / 60, 1.5);
+                maxTargets = Math.min(3 + Math.floor(e * 3), 7);
+                nextSpawnInterval = Math.max(60 * 0.6, 60 * 2 - e * 60);
+                targetSpeedMultiplier = 1.2 + e * 0.5;
+            }
+        }
+
+        function clampCamera() {
+            cameraYaw = Math.max(WORLD_LEFT + 600, Math.min(WORLD_RIGHT - CANVAS_W - 600, cameraYaw));
+            cameraPitch = Math.max(WORLD_TOP + 450, Math.min(WORLD_BOTTOM - CANVAS_H - 450, cameraPitch));
+        }
+
+        // ==================== 绘制 ====================
+        function drawBackground() {
+            ctx.fillStyle = '#0f151d';
+            ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+            const grad = ctx.createRadialGradient(CANVAS_W/2, CANVAS_H/2, 400, CANVAS_W/2, CANVAS_H/2, 2400);
+            grad.addColorStop(0, '#1e2f42'); grad.addColorStop(0.8, '#0a0e14');
+            ctx.fillStyle = grad; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+            const gridSize = 160;
+            const offsetX = (cameraYaw % gridSize + gridSize) % gridSize;
+            const offsetY = (cameraPitch % gridSize + gridSize) % gridSize;
+            ctx.strokeStyle = '#3a4f66'; ctx.lineWidth = 3; ctx.globalAlpha = 0.15;
+            for (let i = -gridSize; i < CANVAS_W + gridSize; i += gridSize) {
+                const x = i + offsetX;
+                ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, CANVAS_H); ctx.stroke();
+            }
+            for (let i = -gridSize; i < CANVAS_H + gridSize; i += gridSize) {
+                const y = i + offsetY;
+                ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(CANVAS_W, y); ctx.stroke();
+            }
+            ctx.globalAlpha = 1.0;
+        }
+
+        function drawTarget(t) {
+            const s = worldToScreen(t.x, t.y);
+            const cx = s.x, cy = s.y, r = t.r;
+            if (cx + r < -2000 || cx - r > CANVAS_W + 2000 || cy + r < -2000 || cy - r > CANVAS_H + 2000) return;
+            const glow = Math.sin(t.pulse) * 0.1 + 0.9;
+
+            ctx.shadowColor = '#ffaa33'; ctx.shadowBlur = 70 * glow;
+            ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fillStyle = '#141414'; ctx.fill();
+            ctx.shadowBlur = 0;
+
+            const rings = [
+                { radius: r, color: '#2a2a2a' }, { radius: r * 0.85, color: '#1e4a6e' },
+                { radius: r * 0.7, color: '#8a2222' }, { radius: r * 0.55, color: '#c49a1a' },
+                { radius: r * 0.4, color: '#e8e8e8' }
+            ];
+            for (let i = 0; i < rings.length; i++) {
+                ctx.beginPath(); ctx.arc(cx, cy, rings[i].radius, 0, Math.PI * 2);
+                ctx.fillStyle = rings[i].color; ctx.fill();
+                ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 6; ctx.stroke();
+            }
+            ctx.beginPath(); ctx.arc(cx, cy, r * 0.1, 0, Math.PI * 2);
+            ctx.fillStyle = '#fff9e6'; ctx.shadowBlur = 50; ctx.shadowColor = '#ffdd88'; ctx.fill();
+            ctx.shadowBlur = 0;
+        }
+
+        function drawGun() {
+            ctx.save();
+            ctx.translate(gunBaseX, gunBaseY);
+            ctx.rotate(gunAngle);
+            const ro = recoil * 50;
+
+            ctx.beginPath(); ctx.ellipse(-40, 40, 70, 130, 0.2, 0, Math.PI * 2);
+            ctx.fillStyle = '#1a1f26'; ctx.fill();
+            ctx.strokeStyle = '#34404d'; ctx.lineWidth = 12; ctx.stroke();
+
+            ctx.beginPath();
+            ctx.moveTo(-70, -20); ctx.lineTo(390 - ro, -70); ctx.lineTo(390 - ro, 70); ctx.lineTo(-70, 95);
+            ctx.closePath(); ctx.fillStyle = '#252c35'; ctx.fill();
+            ctx.strokeStyle = '#4a5c70'; ctx.lineWidth = 9; ctx.stroke();
+
+            ctx.beginPath();
+            ctx.moveTo(330 - ro, -46); ctx.lineTo(620 - ro, -23); ctx.lineTo(620 - ro, 23); ctx.lineTo(330 - ro, 46);
+            ctx.closePath(); ctx.fillStyle = '#1e242b'; ctx.fill();
+            ctx.strokeStyle = '#5a6f85'; ctx.lineWidth = 7; ctx.stroke();
+
+            ctx.beginPath(); ctx.arc(628 - ro, 0, 22, 0, Math.PI * 2);
+            ctx.fillStyle = '#6a7b8c'; ctx.shadowBlur = 40; ctx.shadowColor = '#aac8ff'; ctx.fill();
+            ctx.strokeStyle = '#b0d0ff'; ctx.lineWidth = 6; ctx.stroke(); ctx.shadowBlur = 0;
+
+            if (fireCooldown > FIRE_COOLDOWN_FRAMES * 0.5) {
+                const inten = (fireCooldown - FIRE_COOLDOWN_FRAMES * 0.5) / (FIRE_COOLDOWN_FRAMES * 0.5);
+                ctx.shadowBlur = 120; ctx.shadowColor = '#ffaa33';
+                ctx.beginPath();
+                ctx.moveTo(640 - ro, 0); ctx.lineTo(780 - ro, -65); ctx.lineTo(900 - ro, 0); ctx.lineTo(780 - ro, 65);
+                ctx.closePath(); ctx.fillStyle = `rgba(255, 200, 50, ${inten * 0.9})`; ctx.fill();
+                ctx.fillStyle = `rgba(255, 100, 20, ${inten * 0.7})`;
+                ctx.beginPath(); ctx.arc(740 - ro, 0, 60 * inten, 0, Math.PI * 2); ctx.fill();
+            }
+            ctx.restore();
+        }
+
+        function drawCrosshair() {
+            const x = CROSSHAIR_X, y = CROSSHAIR_Y;
+            ctx.save();
+            ctx.strokeStyle = isZoomed ? '#8affc1' : 'rgba(255,255,255,0.9)';
+            ctx.lineWidth = isZoomed ? 11 : 8;
+            ctx.shadowBlur = 50; ctx.shadowColor = isZoomed ? '#00ffaa' : '#ffffff';
+            const gap = isZoomed ? 55 : 38, len = isZoomed ? 100 : 70;
+            ctx.beginPath(); ctx.moveTo(x - gap - len, y); ctx.lineTo(x - gap, y); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x + gap, y); ctx.lineTo(x + gap + len, y); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x, y - gap - len); ctx.lineTo(x, y - gap); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x, y + gap); ctx.lineTo(x, y + gap + len); ctx.stroke();
+            ctx.beginPath(); ctx.arc(x, y, isZoomed ? 14 : 10, 0, Math.PI * 2);
+            ctx.fillStyle = isZoomed ? '#b3ffd9' : '#ffffff'; ctx.shadowBlur = 60; ctx.fill();
+            if (isZoomed) {
+                ctx.beginPath(); ctx.arc(x, y, 200, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(160, 255, 200, 0.5)'; ctx.lineWidth = 10;
+                ctx.setLineDash([30, 45]); ctx.stroke(); ctx.setLineDash([]);
+            }
+            ctx.restore();
+        }
+
+        function drawFireButton() {
+            if (!isTouchDevice) return;
+            const x = fireBtnX, y = fireBtnY, r = fireBtnR;
+            const pressed = fireCooldown > FIRE_COOLDOWN_FRAMES * 0.7;
+            ctx.save();
+            ctx.shadowBlur = 80; ctx.shadowColor = '#ff3333';
+            ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fillStyle = pressed ? 'rgba(200, 45, 45, 0.85)' : 'rgba(60, 22, 22, 0.7)'; ctx.fill();
+            ctx.strokeStyle = pressed ? 'rgba(255, 140, 140, 0.9)' : 'rgba(170, 68, 68, 0.7)';
+            ctx.lineWidth = 10; ctx.stroke();
+
+            ctx.shadowBlur = 50; ctx.shadowColor = '#ff9966';
+            ctx.beginPath(); ctx.arc(x, y, r * 0.58, 0, Math.PI * 2);
+            ctx.fillStyle = pressed ? 'rgba(255, 180, 70, 0.9)' : 'rgba(160, 85, 40, 0.7)'; ctx.fill();
+            ctx.strokeStyle = 'rgba(255, 220, 150, 0.6)'; ctx.lineWidth = 6; ctx.stroke();
+
+            ctx.beginPath(); ctx.arc(x, y, r * 0.2, 0, Math.PI * 2);
+            ctx.fillStyle = '#fff5e6'; ctx.shadowBlur = 60; ctx.shadowColor = '#ffaa00'; ctx.fill();
+
+            ctx.beginPath(); ctx.moveTo(x - 34, y - 38); ctx.lineTo(x + 48, y); ctx.lineTo(x - 34, y + 38);
+            ctx.closePath(); ctx.fillStyle = '#fff9ef'; ctx.shadowBlur = 50; ctx.shadowColor = '#ffaa00'; ctx.fill();
+            ctx.restore();
+        }
+
+        function drawZoomButton() {
+            if (!isTouchDevice) return;
+            const x = zoomBtnX, y = zoomBtnY, r = zoomBtnR;
+            ctx.save();
+            ctx.shadowBlur = 60; ctx.shadowColor = isZoomed ? '#00ffaa' : '#4488bb';
+            ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fillStyle = isZoomed ? 'rgba(30, 100, 65, 0.8)' : 'rgba(35, 55, 75, 0.75)'; ctx.fill();
+            ctx.strokeStyle = isZoomed ? 'rgba(120, 255, 190, 0.8)' : 'rgba(120, 160, 200, 0.7)';
+            ctx.lineWidth = 9; ctx.stroke();
+
+            ctx.shadowBlur = 30; ctx.shadowColor = isZoomed ? '#88ffcc' : '#88bbdd';
+            const cg = r * 0.42, cl = r * 0.36;
+            ctx.strokeStyle = isZoomed ? '#ccffee' : '#e0eeff'; ctx.lineWidth = 8;
+            ctx.beginPath(); ctx.moveTo(x - cg - cl, y); ctx.lineTo(x - cg, y); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x + cg, y); ctx.lineTo(x + cg + cl, y); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x, y - cg - cl); ctx.lineTo(x, y - cg); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x, y + cg); ctx.lineTo(x, y + cg + cl); ctx.stroke();
+            ctx.beginPath(); ctx.arc(x, y, r * 0.1, 0, Math.PI * 2);
+            ctx.fillStyle = isZoomed ? '#ccffee' : '#e0eeff'; ctx.fill();
+            ctx.restore();
+        }
+
+        function drawZoomVignette() {
+            if (!isZoomed) return;
+            ctx.save();
+            ctx.beginPath(); ctx.rect(0, 0, CANVAS_W, CANVAS_H); ctx.clip();
+            const v = ctx.createRadialGradient(CROSSHAIR_X, CROSSHAIR_Y, 700, CROSSHAIR_X, CROSSHAIR_Y, 2600);
+            v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0, 15, 8, 0.7)');
+            ctx.fillStyle = v; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+            ctx.restore();
+        }
+
+        function updateHUD() {
+            scoreSpan.textContent = score;
+            targetCountSpan.textContent = `${targets.length}/${maxTargets}`;
+            timeSpan.textContent = Math.floor(frameCounter / FPS) + 's';
+        }
+
+        // ===== 核心绘制：开镜时放大背景和靶子 =====
+        function draw() {
+            ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+
+            ctx.save();
+            if (isZoomed) {
+                // 以准星（屏幕中心）为原点放大
+                ctx.translate(CROSSHAIR_X, CROSSHAIR_Y);
+                ctx.scale(ZOOM_SCALE, ZOOM_SCALE);
+                ctx.translate(-CROSSHAIR_X, -CROSSHAIR_Y);
+            }
+            drawBackground();
+            for (let t of targets) drawTarget(t);
+            ctx.restore();
+
+            // 以下内容不放大，固定在屏幕上
+            drawGun();
+            drawCrosshair();
+            drawFireButton();
+            drawZoomButton();
+            drawZoomVignette();
+        }
+
+        // ==================== 游戏循环 ====================
+        function gameLoop() {
+            frameCounter++;
+            updateDifficulty(frameCounter);
+
+            if (targets.length < maxTargets) {
+                spawnTimer++;
+                if (spawnTimer >= nextSpawnInterval) {
+                    targets.push(createTarget());
+                    spawnTimer = 0;
+                }
+            } else spawnTimer = 0;
+
+            updateTargets();
+            clampCamera();
+            if (fireCooldown > 0) fireCooldown--;
+            if (recoil > 0) recoil *= 0.82;
+
+            draw();
+            updateHUD();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // ==================== 交互 ====================
+        function getCanvasCoordsForTouch(touch) {
+            const rect = canvas.getBoundingClientRect();
+            const sx = CANVAS_W / rect.width, sy = CANVAS_H / rect.height;
+            return {
+                x: Math.min(Math.max((touch.clientX - rect.left) * sx, 0), CANVAS_W),
+                y: Math.min(Math.max((touch.clientY - rect.top) * sy, 0), CANVAS_H)
+            };
+        }
+
+        function getCanvasCoords(e) {
+            const rect = canvas.getBoundingClientRect();
+            const sx = CANVAS_W / rect.width, sy = CANVAS_H / rect.height;
+            let cx, cy;
+            if (e.touches) {
+                if (e.touches.length === 0) return null;
+                cx = e.touches[0].clientX; cy = e.touches[0].clientY;
+            } else { cx = e.clientX; cy = e.clientY; }
+            return {
+                x: Math.min(Math.max((cx - rect.left) * sx, 0), CANVAS_W),
+                y: Math.min(Math.max((cy - rect.top) * sy, 0), CANVAS_H)
+            };
+        }
+
+        function hitButton(x, y) {
+            if (!isTouchDevice) return null;
+            if (Math.hypot(x - fireBtnX, y - fireBtnY) <= fireBtnR) return 'fire';
+            if (Math.hypot(x - zoomBtnX, y - zoomBtnY) <= zoomBtnR) return 'zoom';
+            return null;
+        }
+
+        function fire() {
+            if (fireCooldown > 0) return;
+            fireCooldown = FIRE_COOLDOWN_FRAMES; recoil = 1.0;
+            const wp = screenToWorld(CROSSHAIR_X, CROSSHAIR_Y);
+            for (let i = targets.length - 1; i >= 0; i--) {
+                const t = targets[i];
+                const dist = Math.hypot(wp.x - t.x, wp.y - t.y);
+                if (dist <= t.r) {
+                    const ratio = dist / t.r;
+                    let pts = 6;
+                    if (ratio <= 0.4) pts = 10;
+                    else if (ratio <= 0.55) pts = 9;
+                    else if (ratio <= 0.7) pts = 8;
+                    else if (ratio <= 0.85) pts = 7;
+                    score += pts;
+                    targets.splice(i, 1);
+                    break;
+                }
+            }
+        }
+
+        // 触屏
+        function handleTouchStart(e) {
+            e.preventDefault();
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                const touch = e.changedTouches[i];
+                const c = getCanvasCoordsForTouch(touch);
+                const btn = hitButton(c.x, c.y);
+                if (btn === 'fire') {
+                    fire();
+                    activeTouches.set(touch.identifier, { role: 'fire', lastX: c.x, lastY: c.y });
+                } else if (btn === 'zoom') {
+                    isZoomed = !isZoomed;
+                    activeTouches.set(touch.identifier, { role: 'zoom', lastX: c.x, lastY: c.y });
+                } else {
+                    activeTouches.set(touch.identifier, { role: 'drag', lastX: c.x, lastY: c.y });
+                }
+            }
+        }
+
+        function handleTouchMove(e) {
+            e.preventDefault();
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                const touch = e.changedTouches[i];
+                const st = activeTouches.get(touch.identifier);
+                if (!st) continue;
+                const c = getCanvasCoordsForTouch(touch);
+                if (st.role === 'drag') {
+                    cameraYaw -= (c.x - st.lastX) * SENSITIVITY;
+                    cameraPitch -= (c.y - st.lastY) * SENSITIVITY;
+                    clampCamera();
+                }
+                st.lastX = c.x; st.lastY = c.y;
+            }
+        }
+
+        function handleTouchEnd(e) {
+            e.preventDefault();
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                activeTouches.delete(e.changedTouches[i].identifier);
+            }
+        }
+
+        // 鼠标
+        function onMouseMove(e) {
+            if (isTouchDevice) return;
+            e.preventDefault();
+            const c = getCanvasCoords(e);
+            if (!c) return;
+            if (isMouseDown) {
+                cameraYaw -= (c.x - lastMouseX) * SENSITIVITY;
+                cameraPitch -= (c.y - lastMouseY) * SENSITIVITY;
+                clampCamera();
+            }
+            lastMouseX = c.x; lastMouseY = c.y;
+        }
+
+        function onMouseDown(e) {
+            if (isTouchDevice) return;
+            e.preventDefault();
+            const c = getCanvasCoords(e);
+            if (!c) return;
+            if (e.button === 0) {
+                fire();
+                isMouseDown = true;
+                lastMouseX = c.x; lastMouseY = c.y;
+            } else if (e.button === 2) {
+                isZoomed = !isZoomed;
+            }
+        }
+
+        function onMouseUp(e) {
+            if (isTouchDevice) return;
+            e.preventDefault();
+            isMouseDown = false;
+        }
+
+        function onContextMenu(e) { e.preventDefault(); return false; }
+
+        canvas.addEventListener('contextmenu', onContextMenu);
+
+        if (isTouchDevice) {
+            canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+            canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+            canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+            canvas.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+        } else {
+            canvas.addEventListener('mousemove', onMouseMove);
+            canvas.addEventListener('mousedown', onMouseDown);
+            canvas.addEventListener('mouseup', onMouseUp);
+            canvas.addEventListener('mouseleave', onMouseUp);
+        }
+
+        canvas.addEventListener('dblclick', (e) => e.preventDefault());
+
+        // 初始化
+        resizeCanvas();
+        targets = [];
+        scoreSpan.textContent = '0';
+
+        gameLoop();
+        window.addEventListener('resize', resizeCanvas);
+    })();
+</script>
+</body>
+</html>
